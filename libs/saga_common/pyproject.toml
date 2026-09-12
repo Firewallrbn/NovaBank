@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saga-common"
+version = "0.1.0"
+description = "Contratos de eventos y utilidades compartidas de la Saga NovaBank"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.7", "aio-pika>=9.4", "fastapi>=0.115"]
+
+[project.optional-dependencies]
+prefect = ["prefect>=3.4,<4"]
+
+[tool.setuptools.packages.find]
+include = ["saga_common*"]

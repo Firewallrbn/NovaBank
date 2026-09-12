@@ -1,0 +1,142 @@
+name: novabank
+
+x-python-env: &python-env
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  PREFECT_API_URL: http://prefect:4200/api
+  PREFECT_LOGGING_LEVEL: INFO
+
+x-infra-deps: &infra-deps
+  rabbitmq:
+    condition: service_healthy
+  prefect:
+    condition: service_healthy
+
+services:
+  rabbitmq:
+    image: rabbitmq:4-management
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  prefect:
+    image: prefecthq/prefect:3.8.5-python3.12
+    command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+    environment:
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    ports:
+      - "4200:4200"
+    volumes:
+      - prefect-data:/root/.prefect
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 15s
+
+  account-service:
+    build:
+      context: .
+      dockerfile: services/account-service/Dockerfile
+    environment:
+      <<: *python-env
+      DB_PATH: /data/account.db
+    volumes:
+      - account-data:/data
+    ports:
+      - "8101:8000"
+    depends_on: *infra-deps
+
+  risk-service:
+    build:
+      context: .
+      dockerfile: services/risk-service/Dockerfile
+    environment:
+      <<: *python-env
+      DB_PATH: /data/risk.db
+      RISK_MAX_SINGLE_TRANSFER_CENTS: ${RISK_MAX_SINGLE_TRANSFER_CENTS:-40000000}
+      RISK_DAILY_LIMIT_CENTS: ${RISK_DAILY_LIMIT_CENTS:-80000000}
+    volumes:
+      - risk-data:/data
+    ports:
+      - "8102:8000"
+    depends_on: *infra-deps
+
+  clearing-service:
+    build:
+      context: .
+      dockerfile: services/clearing-service/Dockerfile
+    environment:
+      <<: *python-env
+      DB_PATH: /data/clearing.db
+      CLEARING_NETWORK_TIMEOUT_SECONDS: ${CLEARING_NETWORK_TIMEOUT_SECONDS:-3}
+    volumes:
+      - clearing-data:/data
+    ports:
+      - "8103:8000"
+    depends_on: *infra-deps
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    environment:
+      <<: *python-env
+      DB_PATH: /data/orchestrator.db
+      ACCOUNT_URL: http://account-service:8000
+      RISK_URL: http://risk-service:8000
+      CLEARING_URL: http://clearing-service:8000
+    volumes:
+      - orchestrator-data:/data
+    ports:
+      - "8001:8000"
+    depends_on:
+      <<: *infra-deps
+      account-service:
+        condition: service_started
+      risk-service:
+        condition: service_started
+      clearing-service:
+        condition: service_started
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DB_PATH: /data/gateway.db
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      ACCOUNT_URL: http://account-service:8000
+      RISK_URL: http://risk-service:8000
+      CLEARING_URL: http://clearing-service:8000
+      PREFECT_API_URL: http://prefect:4200/api
+      PREFECT_UI_URL: ${PREFECT_UI_URL:-http://localhost:4200}
+      RABBITMQ_UI_URL: ${RABBITMQ_UI_URL:-http://localhost:15672}
+    volumes:
+      - gateway-data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+
+volumes:
+  rabbitmq-data:
+  prefect-data:
+  account-data:
+  risk-data:
+  clearing-data:
+  orchestrator-data:
+  gateway-data:
