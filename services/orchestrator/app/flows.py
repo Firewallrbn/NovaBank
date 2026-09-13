@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from uuid import uuid4
 
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
@@ -30,6 +31,30 @@ class _Runtime:
 
 
 runtime = _Runtime()
+
+
+async def ensure_runtime() -> None:
+    """Prepara las dependencias del flow si nadie las inyectó todavía.
+
+    El servicio las inyecta al arrancar, pero Prefect ejecuta los flow runs de un
+    despliegue en un subproceso propio: allí este módulo se importa de cero y hay
+    que construirlas otra vez para que la saga lanzada desde Prefect funcione.
+    """
+    if getattr(runtime, "tracker", None) is not None:
+        return
+
+    import httpx
+
+    from app.config import DB_PATH, HTTP_TIMEOUT_SECONDS, RABBITMQ_URL, SERVICE_NAME
+    from app.tracker import SCHEMA
+    from saga_common.db import Database
+    from saga_common.messaging import MessageBus
+    from saga_common.telemetry import Telemetry
+
+    bus = MessageBus(RABBITMQ_URL)
+    await bus.connect()
+    runtime.tracker = SagaTracker(Database(DB_PATH, SCHEMA), Telemetry(bus, SERVICE_NAME))
+    runtime.clients = BankingClients(httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS))
 
 
 async def _run_forward(
@@ -152,9 +177,25 @@ async def _rollback(
     return Failed(name=final_status.value, message=detail)
 
 
+# Parámetros por defecto del despliegue: permiten lanzar una saga desde la propia
+# UI de Prefect sin pasar por el gateway, útil para inspeccionar el flow a solas.
+DEMO_PAYLOAD = {
+    "source_account": "ACC-001",
+    "destination_account": "ACC-002",
+    "amount_cents": 5_000_000,
+    "chaos": {"force_fraud": False, "clearing_timeout": False},
+    "delay_seconds": 2.0,
+}
+
+
 @flow(name="transfer-saga-orquestada", flow_run_name="transfer-{transfer_id}")
-async def transfer_saga(transfer_id: str, payload: dict) -> State:
-    transfer = TransferPayload.model_validate(payload)
+async def transfer_saga(transfer_id: str = "", payload: dict | None = None) -> State:
+    await ensure_runtime()
+    transfer_id = transfer_id or str(uuid4())
+    transfer = TransferPayload.model_validate({**(payload or DEMO_PAYLOAD), "transfer_id": transfer_id})
+    # El saga log es idempotente: la saga puede venir del gateway o de un disparo
+    # manual desde Prefect, y en ambos casos queda registrada aquí.
+    runtime.tracker.create(transfer)
     await runtime.tracker.status(
         transfer_id, TransferStatus.EN_PROCESO, detail="Saga orquestada iniciada", flow_run_id=flow_run.id
     )
@@ -182,6 +223,7 @@ _UNDO_ALWAYS = {StepStatus.RUNNING, StepStatus.SUCCEEDED, StepStatus.COMPENSATIN
 @flow(name="transfer-saga-recuperacion", flow_run_name="recover-{transfer_id}")
 async def recover_saga(transfer_id: str, payload: dict) -> State:
     """Resumes a saga orphaned by an orchestrator crash: forward after the pivot, backward before it."""
+    await ensure_runtime()
     transfer = TransferPayload.model_validate(payload)
     tracker = runtime.tracker
     saga = tracker.get(transfer_id) or {}

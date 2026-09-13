@@ -132,6 +132,16 @@ services:
       orchestrator:
         condition: service_started
 
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      api-gateway:
+        condition: service_started
+
 volumes:
   rabbitmq-data:
   prefect-data:

@@ -10,3 +10,7 @@ CLEARING_URL = os.getenv("CLEARING_URL", "http://clearing-service:8000")
 
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
 RECOVERY_INTERVAL_SECONDS = float(os.getenv("RECOVERY_INTERVAL_SECONDS", "15"))
+
+# Despliegue permanente en Prefect: el flow existe en la UI aunque no haya sagas.
+DEPLOYMENT_NAME = os.getenv("PREFECT_DEPLOYMENT_NAME", "novabank")
+DEPLOYMENT_POLL_SECONDS = float(os.getenv("PREFECT_DEPLOYMENT_POLL_SECONDS", "10"))

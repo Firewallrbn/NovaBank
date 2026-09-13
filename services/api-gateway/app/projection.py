@@ -31,7 +31,7 @@ def _status_detail(event: DomainEvent, status: TransferStatus) -> str | None:
     if status is TransferStatus.CONFIRMADO:
         return "Transferencia confirmada: saldo acreditado en la cuenta destino"
     if status is TransferStatus.COMPENSANDO:
-        return f"{event.detail} — los servicios compensan de forma autónoma"
+        return f"{event.detail}. Los servicios compensan de forma autónoma"
     return event.detail
 
 

@@ -5,10 +5,17 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from app import flows
+from app import deployments, flows
 from app.api import router
 from app.clients import BankingClients
-from app.config import DB_PATH, HTTP_TIMEOUT_SECONDS, RABBITMQ_URL, RECOVERY_INTERVAL_SECONDS, SERVICE_NAME
+from app.config import (
+    DB_PATH,
+    DEPLOYMENT_POLL_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+    RABBITMQ_URL,
+    RECOVERY_INTERVAL_SECONDS,
+    SERVICE_NAME,
+)
 from app.runner import SagaRunner
 from app.tracker import SCHEMA, SagaTracker
 from saga_common.db import Database
@@ -33,11 +40,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.tracker = tracker
     app.state.runner = runner
 
-    recovery = asyncio.create_task(runner.recovery_loop(RECOVERY_INTERVAL_SECONDS))
+    background = [asyncio.create_task(runner.recovery_loop(RECOVERY_INTERVAL_SECONDS))]
+    if (serving := await deployments.register(DEPLOYMENT_POLL_SECONDS)) is not None:
+        background.append(serving)
     try:
         yield
     finally:
-        recovery.cancel()
+        for task in background:
+            task.cancel()
         await http.aclose()
         await bus.close()
 

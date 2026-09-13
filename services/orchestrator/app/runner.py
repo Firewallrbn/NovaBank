@@ -42,7 +42,7 @@ class SagaRunner:
     async def recovery_loop(self, interval: float) -> None:
         while True:
             try:
-                for saga in self._tracker.unfinished():
+                for saga in self._tracker.unfinished(quiet_seconds=interval * 2):
                     transfer_id = saga["transfer_id"]
                     if transfer_id in self._active:
                         continue

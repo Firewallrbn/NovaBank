@@ -1,6 +1,7 @@
 """Persistent saga log of the orchestrator (write-ahead) plus telemetry for every state change."""
 
 import json
+from datetime import timedelta
 
 from saga_common.contracts import (
     SAGA_STEPS,
@@ -11,6 +12,7 @@ from saga_common.contracts import (
     TransferPayload,
     TransferStatus,
     now_iso,
+    utcnow,
 )
 from saga_common.db import Database
 from saga_common.telemetry import Telemetry
@@ -63,11 +65,17 @@ class SagaTracker:
     def recent(self, limit: int) -> list[dict]:
         return [self._serialize(s) for s in self._db.query("SELECT * FROM sagas ORDER BY created_at DESC LIMIT ?", (limit,))]
 
-    def unfinished(self) -> list[dict]:
+    def unfinished(self, quiet_seconds: float = 0.0) -> list[dict]:
+        """Sagas sin estado final que llevan `quiet_seconds` sin moverse.
+
+        La espera evita adoptar una saga que otro proceso (por ejemplo el Runner
+        de Prefect, que ejecuta los flow runs en un subproceso) acaba de arrancar.
+        """
         placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
+        cutoff = (utcnow() - timedelta(seconds=quiet_seconds)).isoformat()
         return self._db.query(
-            f"SELECT * FROM sagas WHERE status NOT IN ({placeholders}) ORDER BY created_at",
-            tuple(s.value for s in TERMINAL_STATUSES),
+            f"SELECT * FROM sagas WHERE status NOT IN ({placeholders}) AND updated_at <= ? ORDER BY created_at",
+            (*(s.value for s in TERMINAL_STATUSES), cutoff),
         )
 
     def step_statuses(self, transfer_id: str) -> dict[StepName, StepStatus]:

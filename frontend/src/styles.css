@@ -1,0 +1,112 @@
+@import 'tailwindcss';
+
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/geist-mono';
+
+/* ---------------------------------------------------------------------------
+   Sistema de diseño NovaBank
+   - Tema: oscuro, bloqueado para toda la página (sin secciones invertidas).
+   - Acento: un solo verde. El degradado del shader del hero usa dos paradas
+     de esa misma familia, no un segundo acento.
+   - Colores de estado (fallo, compensación): son semánticos de la máquina de
+     estados de la saga, no decoración. Van desaturados para convivir con el verde.
+   - Radios: interactivos 10px · tarjetas 16px · píldoras completas.
+--------------------------------------------------------------------------- */
+
+@theme {
+  /* Inter variable: su eje óptico entrega los cortes Display en los titulares
+     grandes y los cortes de texto en el cuerpo, sin cargar dos familias. */
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;
+
+  --color-ink-950: #06090880;
+  --color-ink-900: #070a09;
+  --color-ink-850: #0a0e0d;
+  --color-ink-800: #0d1211;
+  --color-ink-700: #141a18;
+  --color-ink-600: #1d2523;
+  --color-ink-500: #2a3432;
+
+  --color-fog-100: #e9efec;
+  --color-fog-300: #b6c2be;
+  --color-fog-500: #8b9894;
+  --color-fog-700: #5d6a66;
+
+  --color-accent: #35d07f;
+  --color-accent-bright: #7ef07a;
+  --color-accent-deep: #0c8f63;
+  --color-accent-dim: #35d07f1f;
+
+  --color-danger: #e5645d;
+  --color-warn: #e2a13c;
+
+  --radius-control: 10px;
+  --radius-card: 16px;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-ink-900);
+    color: var(--color-fog-100);
+    font-family: var(--font-sans);
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    font-synthesis-weight: none;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-ink-900);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* Barra de scroll discreta, coherente con el tema oscuro. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-ink-600) transparent;
+  }
+}
+
+@layer components {
+  .shell {
+    margin-inline: auto;
+    width: 100%;
+    max-width: 1240px;
+    padding-inline: 1.25rem;
+  }
+
+  @media (min-width: 768px) {
+    .shell {
+      padding-inline: 2rem;
+    }
+  }
+
+  /* Borde superior iluminado: da volumen sin recurrir a glows de neón. */
+  .hairline-top {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
