@@ -1,8 +1,10 @@
 """Passive read model: it listens to telemetry and domain events and never commands any service."""
 
+import logging
 from collections.abc import Callable
 
 from app.config import SERVICE_NAME
+from app.tracer import SagaTracer
 from app.store import AuditCategory, add_audit, apply_status, apply_step, claim_message, snapshot
 from app.stream import Broadcaster
 from saga_common.contracts import (
@@ -14,6 +16,8 @@ from saga_common.contracts import (
     status_for_failure,
 )
 from saga_common.db import Database
+
+log = logging.getLogger(__name__)
 
 EVENT_STATUS: dict[EventType, Callable[[DomainEvent], TransferStatus]] = {
     EventType.TRANSFER_REQUESTED: lambda event: TransferStatus.EN_PROCESO,
@@ -36,9 +40,10 @@ def _status_detail(event: DomainEvent, status: TransferStatus) -> str | None:
 
 
 class Projection:
-    def __init__(self, db: Database, broadcaster: Broadcaster) -> None:
+    def __init__(self, db: Database, broadcaster: Broadcaster, tracer: SagaTracer | None = None) -> None:
         self._db = db
         self._broadcaster = broadcaster
+        self._tracer = tracer
 
     def broadcast(self, transfer_id: str, audit_entries: list[dict]) -> None:
         transfer = snapshot(self._db, transfer_id)
@@ -90,4 +95,11 @@ class Projection:
                         add_audit(conn, transfer_id, SERVICE_NAME, AuditCategory.ESTADO,
                                   status=status, reason=event.reason, detail=detail)
                     )
+        # Traza pasiva en Prefect, ya pasado el filtro de idempotencia para no duplicar eventos
+        # reentregados. Es observación pura: si falla, la proyección sigue su curso.
+        if self._tracer is not None:
+            try:
+                self._tracer.record(event)
+            except Exception:
+                log.exception("No se pudo trazar el evento %s", event.event_id)
         self.broadcast(transfer_id, entries)

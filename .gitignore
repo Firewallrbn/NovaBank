@@ -9,3 +9,6 @@ build/
 node_modules/
 dist/
 .env
+
+# guion interno del video (no se publica)
+docs/GUION-VIDEO.md

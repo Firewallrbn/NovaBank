@@ -1,4 +1,19 @@
-# NovaBank International — Patrón Saga bancario
+# NovaBank International - Patrón Saga bancario
+
+[![Estado: Completado](https://img.shields.io/badge/Estado-Completado-success.svg)](#)
+[![Patron: Saga](https://img.shields.io/badge/Patr%C3%B3n-Saga-6f42c1.svg)](#)
+[![Modalidades: Orquestacion + Coreografia](https://img.shields.io/badge/Modalidades-Orquestaci%C3%B3n_%2B_Coreograf%C3%ADa-8957e5.svg)](#)
+[![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)](#)
+[![Orquestador: Prefect 3](https://img.shields.io/badge/Orquestador-Prefect_3.8-024DFD.svg)](#)
+[![Mensajeria: RabbitMQ](https://img.shields.io/badge/Mensajer%C3%ADa-RabbitMQ_4-FF6600.svg)](#)
+[![Infra: Docker Compose](https://img.shields.io/badge/Infra-Docker_Compose-2496ED.svg)](#)
+[![Frontend: React + Vite](https://img.shields.io/badge/Frontend-React_19_%2B_Vite-61DAFB.svg)](#)
+[![Datos: SQLite por servicio](https://img.shields.io/badge/Datos-SQLite_por_servicio-003B57.svg)](#)
+[![Casos de prueba: CP-01 a CP-05](https://img.shields.io/badge/Casos_de_prueba-CP--01_a_CP--05_OK-success.svg)](#)
+
+**Juan David Cruz** · **Ángel Julián David Aguilar Zambrano**
+
+![Landing de NovaBank](docs/img/01-landing.png)
 
 Transferencias interbancarias distribuidas bajo el modelo **BASE**, implementadas con el patrón Saga en
 **las dos modalidades**: orquestación (coordinador central con Prefect) y coreografía (eventos sobre
@@ -8,22 +23,56 @@ idempotencia de punta a punta y observabilidad en tiempo real.
 Taller completo en [`TALLER.md`](TALLER.md) · Diseño en [`docs/PLAN.md`](docs/PLAN.md) · Comparativa en
 [`docs/orquestacion-vs-coreografia.md`](docs/orquestacion-vs-coreografia.md).
 
+## Video demostrativo
+
+[![Ver el video demostrativo de NovaBank](https://img.youtube.com/vi/9cw97uO2bDE/maxresdefault.jpg)](https://www.youtube.com/watch?v=9cw97uO2bDE)
+
+Haz clic en la imagen para reproducirlo. Recorrido completo del proyecto: la arquitectura, los cinco casos
+de prueba en las dos modalidades y la comparación de la traza en Prefect.
+<https://www.youtube.com/watch?v=9cw97uO2bDE>
+
+## El simulador
+
+![Simulador con una orquestación exitosa](docs/img/02-simulador.png)
+
+Una transferencia **CP-01 en orquestación**: los cuatro pasos en verde, con el detalle real de cada uno
+(saldo nuevo, cupo de riesgo consumido, referencia de liquidación) y el botón de reintento que demuestra
+la idempotencia. A la izquierda, los switches de caos, el selector de modalidad y la pausa configurable
+de 2 a 4 segundos que hace visible la marcha atrás.
+
 ## Arquitectura
 
-```
-Frontend (React + Vite, nginx :5173)
-        |  /api
-        v
-API Gateway (:8000)  ->  idempotencia, bitácora de auditoría, SSE en vivo
-        |
-        |-- modo orquestación --HTTP--> Orchestrator (:8001)  [flow de Prefect]
-        |                                   `--comandos--> Account · Risk · Clearing
-        |
-        `-- modo coreografía --publica TransferenciaSolicitada--> RabbitMQ
-                                        `--> los servicios reaccionan entre sí
+```mermaid
+flowchart TB
+    FE["Frontend · React + Vite<br/>nginx :5173<br/><i>simulador de caos + SSE</i>"]
+    GW["API Gateway :8000<br/><i>idempotencia · auditoría · SSE</i>"]
 
-Account (:8101)   Risk (:8102)   Clearing (:8103)      <- una base SQLite por servicio
-RabbitMQ (:5672 / consola :15672)   Prefect (:4200)
+    FE -->|"/api"| GW
+
+    ORC["Orchestrator :8001<br/><i>flow de Prefect · saga log</i>"]
+    MQ(["RabbitMQ :5672<br/><i>novabank.events</i>"])
+
+    GW -->|"modo orquestación<br/>POST /sagas"| ORC
+    GW -->|"modo coreografía<br/>TransferenciaSolicitada"| MQ
+
+    ACC[("Account :8101<br/>account.db")]
+    RSK[("Risk :8102<br/>risk.db")]
+    CLR[("Clearing :8103<br/>clearing.db")]
+
+    ORC -->|"comandos HTTP"| ACC
+    ORC -->|"comandos HTTP"| RSK
+    ORC -->|"comandos HTTP"| CLR
+
+    MQ <-->|"eventos de dominio"| ACC
+    MQ <-->|"eventos de dominio"| RSK
+    MQ <-->|"eventos de dominio"| CLR
+
+    MQ -.->|"telemetría"| GW
+    PF["Prefect :4200<br/><i>trazabilidad</i>"]
+    ORC -.-> PF
+    ACC -.-> PF
+    RSK -.-> PF
+    CLR -.-> PF
 ```
 
 Cada microservicio tiene su **propia base de datos en su propio volumen Docker** (Database-per-Service).
@@ -39,6 +88,81 @@ El dinero se maneja siempre en enteros (centavos), nunca en coma flotante.
 | 4 | Crédito en cuenta destino | Account | no se compensa: se reintenta hasta completar |
 
 Ante un fallo, las compensaciones se ejecutan **en orden inverso estricto** (3 → 2 → 1).
+
+### Flujo de estados de la saga
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDIENTE
+    PENDIENTE --> EN_PROCESO: saga despachada
+    EN_PROCESO --> RECHAZADO_FONDOS: falla paso 1<br/>(sin compensación)
+    EN_PROCESO --> COMPENSANDO: falla paso 2 o 3
+    COMPENSANDO --> RECHAZADO_RIESGO: fraude / límites
+    COMPENSANDO --> RECHAZADO_RED: timeout interbancario
+    EN_PROCESO --> CONFIRMADO: pasos 1-4 OK
+    RECHAZADO_FONDOS --> [*]
+    RECHAZADO_RIESGO --> [*]
+    RECHAZADO_RED --> [*]
+    CONFIRMADO --> [*]
+```
+
+### CP-04 en orquestación: el coordinador manda las compensaciones
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant A as Account
+    participant R as Risk
+    participant C as Clearing
+
+    O->>A: 1. POST /accounts/debits
+    A-->>O: SUCCEEDED (saldo -$100.000)
+    O->>R: 2. POST /risk/evaluations
+    R-->>O: SUCCEEDED (cupo reservado)
+    O->>C: 3. POST /clearing/settlements
+    C-->>O: REJECTED · NETWORK_TIMEOUT
+
+    Note over O: pila de completados = [DEBIT, RISK]<br/>se desapila en orden inverso
+    O->>R: compensa POST /risk/evaluations/{id}/revert
+    R-->>O: COMPENSATED (cupo liberado)
+    O->>A: compensa POST /accounts/debits/{id}/refund
+    A-->>O: COMPENSATED (saldo restituido)
+    Note over O: estado final RECHAZADO_RED
+```
+
+### CP-04 en coreografía: el orden inverso emerge de la cadena causal
+
+```mermaid
+sequenceDiagram
+    participant G as Gateway
+    participant A as Account
+    participant R as Risk
+    participant C as Clearing
+
+    G-->>A: TransferenciaSolicitada
+    A-->>R: SaldoDebitado
+    R-->>C: RiesgoAprobado
+    Note over C: la red externa no responde
+    C-->>R: TransferenciaFallida
+
+    Note over R,A: Account NO reacciona a TransferenciaFallida.<br/>Espera a AprobacionRiesgoAnulada, que solo Risk<br/>puede emitir tras deshacer lo suyo → orden inverso garantizado
+    R-->>A: AprobacionRiesgoAnulada
+    A-->>G: DebitoReversado
+    Note over G: estado final RECHAZADO_RED
+```
+
+Nadie coordina la coreografía: el orden inverso no está programado en ningún sitio, **emerge del
+encadenamiento causal** de los eventos.
+
+Esa cadena no se declara en el código, se declara en el *broker*. Los bindings del exchange
+`novabank.events` son, literalmente, el grafo de la saga coreografiada:
+
+![Bindings del exchange novabank.events en RabbitMQ](docs/img/03-rabbitmq-bindings.png)
+
+Cada cola se ata solo a los eventos que le incumben: `risk-service` escucha `SaldoDebitado` (seguir
+adelante) y `TransferenciaFallida` (deshacer lo suyo); `account-service` escucha
+`AprobacionRiesgoAnulada`, que es su señal de compensar, y nunca el fallo original. La cola
+`api-gateway.projection` se ata con `#` porque el Gateway lo observa todo sin decidir nada.
 
 ## Puesta en marcha
 
@@ -121,6 +245,50 @@ python scripts/casos_prueba.py orchestration   # solo orquestación
 
 Salida esperada: todos los casos en `OK` y el dinero total intacto en las dos modalidades.
 
+<details>
+<summary><b>Salida real de la última verificación</b> (stack completo, Docker)</summary>
+
+```
+=== ORQUESTACIÓN ===
+  OK   CP-01 Camino feliz                        10.3s
+  OK   CP-02 Fondos insuficientes                 4.3s
+  OK   CP-03 Fraude detectado                     8.2s
+  OK   CP-04 Caída de la red interbancaria       15.5s
+  OK   dinero total invariante: $1,800,000.00
+
+=== COREOGRAFÍA ===
+  OK   CP-01 Camino feliz                        11.3s
+  OK   CP-02 Fondos insuficientes                 4.3s
+  OK   CP-03 Fraude detectado                    12.3s
+  OK   CP-04 Caída de la red interbancaria       21.6s
+  OK   dinero total invariante: $1,800,000.00
+
+Todos los casos pasaron.
+```
+
+CP-05 se verifica dentro de cada caso: tras alcanzar el estado final, el script reenvía la misma
+`Idempotency-Key` y comprueba que responde `200 duplicate=true` y que **ningún saldo se mueve**.
+
+</details>
+
+### Evidencia de compensación en orden inverso
+
+Traza real de un CP-04 en coreografía (`GET /api/transfers/{id}`). Obsérvense las marcas de tiempo: el
+fallo ocurre en `CLEARING`, y las compensaciones suben **al revés** del camino de ida.
+
+```
+DEBIT     COMPENSATED   10:12:03     <- se compensa el último
+RISK      COMPENSATED   10:11:59
+CLEARING  FAILED        10:11:54     <- aquí falla
+CREDIT    SKIPPED       10:12:03
+
+10:11:42  Débito de $100.000,00 en ACC-001 (nuevo saldo $800.000,00)
+10:11:47  Riesgo aprobado: cupo diario de ACC-001 usado $200.000,00 de $800.000,00
+10:11:54  La red interbancaria no respondió en 3 s: liquidación no realizada
+10:11:59  Aprobación anulada: se liberan $100.000,00 del cupo diario de ACC-001
+10:12:03  Reintegro de $100.000,00 en ACC-001 (saldo restituido $900.000,00)
+```
+
 ### Los mismos casos por API
 
 ```bash
@@ -141,21 +309,62 @@ Repetir la **misma** llamada con la misma `Idempotency-Key` demuestra CP-05: res
 
 ## Observabilidad
 
-- **Prefect** (http://localhost:4200). El orquestador registra al arrancar el **despliegue permanente**
-  `transfer-saga-orquestada/novabank`, así que el flow existe en la consola aunque todavía no se haya
-  ejecutado ninguna saga, y los flow runs sobreviven a reinicios (viven en el volumen `prefect-data`).
-  Desde ese despliegue se puede lanzar una saga de demostración con el botón **Run** de Prefect: el
-  orquestador deja un runner atendiendo esos flow runs.
-  - En orquestación verás **un** flow run `transfer-<id>` con sus tasks: el paso que falló en rojo y las
-    compensaciones posteriores en verde.
-  - En coreografía verás **varios** flow runs independientes, uno por servicio; fíltralos por el tag
-    `transfer:<id>` para ver la cadena completa. Ese contraste es la diferencia entre los dos patrones.
-- **RabbitMQ** (http://localhost:15672). Exchanges `novabank.events` (eventos de dominio) y
-  `novabank.telemetry` (cambios de estado). En Queues se ve a los servicios consumiendo.
-- **Bitácora de auditoría**: en el frontend, o `GET /api/transfers/{id}/audit`. Cada cambio de estado con
-  su origen, su motivo y su marca de tiempo.
+### Prefect (http://localhost:4200)
 
-### Pruebas de robustez (quedan bien en el video)
+El orquestador registra al arrancar el **despliegue permanente** `transfer-saga-orquestada/novabank`, así
+que el flow existe en la consola aunque todavía no se haya ejecutado ninguna saga, y los flow runs
+sobreviven a reinicios (viven en el volumen `prefect-data`). Desde ese despliegue se puede lanzar una saga
+de demostración con el botón **Run** de Prefect: el orquestador deja un runner atendiendo esos flow runs.
+
+En **orquestación** verás **un** flow run `transfer-<id>`, y dentro de él la saga entera:
+
+![Un único flow run con toda la saga orquestada](docs/img/04-prefect-orquestacion.png)
+
+Un CP-04 completo en 16 segundos y 5 tasks encadenados: `debit_source` y `evaluate_risk` en verde,
+`settle_clearing` en rojo, y a continuación `revert_risk_approval` y `refund_debit`, también en verde,
+porque compensar correctamente es un éxito. El estado final del flow run es el estado de la saga,
+`RECHAZADO_RED`. Ese flow run **es** la saga: tiene un principio, un final, un dueño y una pila de
+compensaciones que se desapila sola.
+
+En **coreografía** no hay nada equivalente. La misma transferencia se ve así:
+
+![Seis flow runs independientes de una misma saga coreografiada](docs/img/05-prefect-coreografia-runs.png)
+
+Una transferencia coreografiada: **seis flow runs independientes, ninguno con padre**. Cada uno lleva el
+nombre del evento que lo disparó y del servicio que reaccionó —`account-service.TransferenciaSolicitada`,
+`risk-service.SaldoDebitado`, `clearing-service.RiesgoAprobado`…— y lo único que los relaciona es el tag
+`transfer:<id>` que comparten los seis. La reacción de clearing queda en `Rechazado` y, a continuación,
+las dos compensaciones en `Compensated`: la del riesgo a las 07:24:00 y la del débito a las 07:24:05,
+cinco segundos después. El orden inverso está ahí, en las marcas de tiempo, sin que nadie lo haya
+ordenado.
+
+Entre esos seis hay uno distinto, `saga-trace-coreografiada`:
+
+![Traza pasiva de la saga coreografiada en Prefect](docs/img/06-prefect-saga-trace.png)
+
+Cada saga coreografiada genera además un flow run **`saga-<id>`** con un task por evento de dominio y sus
+tiempos reales, que es lo que permite ver la cadena completa de un vistazo: `TransferenciaSolicitada` →
+`SaldoDebitado` → `RiesgoAprobado` → `TransferenciaFallida` (en rojo) → `AprobacionRiesgoAnulada` →
+`DebitoReversado`, y el estado final `RECHAZADO_RED`. Es una **traza pasiva** que construye el Gateway,
+un observador y no un coordinador: registra lo que ya ocurrió, igual que la bitácora, sin emitir comandos
+ni decidir el paso siguiente. Existe precisamente porque en coreografía la historia completa no vive en
+ningún sitio: hay que reconstruirla observando el bus.
+
+Ese contraste —la saga como objeto de primera clase frente a una historia que sólo existe si alguien la
+observa— es la diferencia entre los dos patrones.
+
+### RabbitMQ (http://localhost:15672)
+
+Exchanges `novabank.events` (eventos de dominio) y `novabank.telemetry` (cambios de estado). En **Queues**
+se ve a los servicios consumiendo, y en **Exchanges → novabank.events → Bindings** está el grafo de la
+saga coreografiada que se muestra más arriba.
+
+### Bitácora de auditoría
+
+En el frontend, o `GET /api/transfers/{id}/audit`. Cada cambio de estado con su origen, su motivo y su
+marca de tiempo.
+
+### Pruebas de robustez
 
 ```bash
 # Orquestación: matar el orquestador a mitad de una saga, el bucle de recuperación la retoma
@@ -202,13 +411,14 @@ En ambos casos la saga termina en un estado consistente, sin dinero perdido ni p
 docker-compose.yml          orquestación de los 8 contenedores
 .env.example                parámetros de la simulación
 libs/saga_common/           contratos, bus, outbox/inbox, telemetría, base de datos
-services/api-gateway/       idempotencia, proyección pasiva, SSE, auditoría
+services/api-gateway/       idempotencia, proyección pasiva, SSE, auditoría, traza de la saga
 services/orchestrator/      flows de Prefect, saga log, recuperación, despliegue
 services/account-service/   cuentas, libro mayor, débitos/créditos/reintegros
 services/risk-service/      reglas antifraude y límites diarios
 services/clearing-service/  pasarela interbancaria simulada
 frontend/                   React + Vite + Tailwind: landing y simulador de caos
 scripts/casos_prueba.py     verificación automática de CP-01 a CP-05
+docs/img/                   capturas del simulador, Prefect y RabbitMQ
 docs/                       PLAN.md · orquestacion-vs-coreografia.md
 ```
 

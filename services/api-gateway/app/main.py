@@ -12,6 +12,7 @@ from app.projection import Projection
 from app.routes import router
 from app.store import SCHEMA
 from app.stream import Broadcaster
+from app.tracer import SagaTracer
 from saga_common.db import Database
 from saga_common.logs import configure_logging
 from saga_common.messaging import MessageBus
@@ -28,7 +29,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     http = httpx.AsyncClient(timeout=10)
 
     broadcaster = Broadcaster()
-    projection = Projection(db, broadcaster)
+    tracer = SagaTracer()
+    projection = Projection(db, broadcaster, tracer)
     relay = OutboxRelay(db, bus)
     dispatcher = Dispatcher(db, http, projection)
 
@@ -47,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         for task in background:
             task.cancel()
+        tracer.cancel_all()
         await http.aclose()
         await bus.close()
 

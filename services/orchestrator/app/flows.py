@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
-from prefect import flow, task
+from prefect import allow_failure, flow, task
 from prefect.cache_policies import NO_CACHE
 from prefect.runtime import flow_run
 from prefect.states import Completed, Failed, State
@@ -31,6 +31,26 @@ class _Runtime:
 
 
 runtime = _Runtime()
+
+# Última excepción de cada saga, guardada **en memoria del orquestador**.
+#
+# Los pasos se encadenan con `wait_for` para que Prefect dibuje el grafo de la saga, y eso obliga a
+# leer el resultado del task como estado en vez de como excepción. El problema es que una excepción
+# que viaja por el estado de Prefect se serializa y vuelve como otro objeto: el `except StepRejected`
+# dejaría de reconocerla y la saga acabaría en FALLO_TECNICO en vez de clasificar el rechazo.
+# Por eso la referencia original se conserva aquí: la clasificación de estados nunca depende de lo
+# que Prefect deserialice.
+_step_errors: dict[str, Exception] = {}
+
+
+def _chain(previous):
+    """Declara la dependencia con el paso anterior; `allow_failure` permite encadenar las
+    compensaciones detrás del paso que falló, que es justo lo que hay que poder ver."""
+    return [allow_failure(previous)] if previous is not None else None
+
+
+def _raise_recorded(transfer_id: str, fallback: str) -> None:
+    raise _step_errors.pop(transfer_id, None) or StepUnavailable(fallback, ambiguous=True)
 
 
 async def ensure_runtime() -> None:
@@ -72,6 +92,7 @@ async def _run_forward(
         result = await call(transfer)
     except StepRejected as exc:
         await tracker.step(transfer_id, step, StepStatus.FAILED, detail=str(exc), reason=exc.result.reason)
+        _step_errors[transfer_id] = exc
         raise
     except StepUnavailable as exc:
         if retryable:
@@ -80,6 +101,7 @@ async def _run_forward(
             await tracker.step(
                 transfer_id, step, StepStatus.FAILED, detail=str(exc), reason=FailureReason.SERVICE_UNAVAILABLE
             )
+        _step_errors[transfer_id] = exc
         raise
     await tracker.step(transfer_id, step, StepStatus.SUCCEEDED, detail=result.detail)
     return result
@@ -147,8 +169,10 @@ COMPENSATIONS = {
 }
 
 
-async def _confirm(transfer: TransferPayload) -> State:
-    await credit_destination(transfer)
+async def _confirm(transfer: TransferPayload, previous=None) -> State:
+    state = await credit_destination(transfer, return_state=True, wait_for=_chain(previous))
+    if state.is_failed() or state.is_crashed():
+        _raise_recorded(transfer.transfer_id, "El crédito en destino no pudo completarse")
     detail = (
         f"Transferencia de {format_money(transfer.amount_cents)} de {transfer.source_account} "
         f"a {transfer.destination_account} confirmada"
@@ -162,6 +186,7 @@ async def _rollback(
     to_compensate: list[StepName],
     reason: FailureReason | None,
     detail: str,
+    previous=None,
 ) -> State:
     tracker = runtime.tracker
     final_status = status_for_failure(reason)
@@ -172,7 +197,10 @@ async def _rollback(
             transfer.transfer_id, TransferStatus.COMPENSANDO, detail=f"Compensando en orden inverso: {order}", reason=reason
         )
         for step in reversed(to_compensate):
-            await COMPENSATIONS[step](transfer)
+            previous = await COMPENSATIONS[step](transfer, return_state=True, wait_for=_chain(previous))
+            if previous.is_failed() or previous.is_crashed():
+                # Se propaga para que el bucle de recuperación retome la saga, igual que antes.
+                raise RuntimeError(f"La compensación de {step.value} no pudo completarse")
     await tracker.status(transfer.transfer_id, final_status, detail=detail, reason=reason)
     return Failed(name=final_status.value, message=detail)
 
@@ -202,19 +230,25 @@ async def transfer_saga(transfer_id: str = "", payload: dict | None = None) -> S
 
     completed: list[StepName] = []
     current: StepName | None = None
+    previous = None
+    _step_errors.pop(transfer_id, None)
     try:
         for step, forward in STEPS_BEFORE_PIVOT:
             current = step
-            await forward(transfer)
+            # `previous` se asigna antes de comprobar el fallo: así las compensaciones se encadenan
+            # detrás del paso que falló y no detrás del último que salió bien.
+            previous = await forward(transfer, return_state=True, wait_for=_chain(previous))
+            if previous.is_failed() or previous.is_crashed():
+                _raise_recorded(transfer_id, f"El paso {step.value} no devolvió resultado")
             completed.append(step)
     except StepRejected as exc:
-        return await _rollback(transfer, completed, exc.result.reason, str(exc))
+        return await _rollback(transfer, completed, exc.result.reason, str(exc), previous)
     except StepUnavailable as exc:
         if exc.ambiguous and current is not None:
             completed.append(current)
-        return await _rollback(transfer, completed, FailureReason.SERVICE_UNAVAILABLE, str(exc))
+        return await _rollback(transfer, completed, FailureReason.SERVICE_UNAVAILABLE, str(exc), previous)
 
-    return await _confirm(transfer)
+    return await _confirm(transfer, previous)
 
 
 _UNDO_ALWAYS = {StepStatus.RUNNING, StepStatus.SUCCEEDED, StepStatus.COMPENSATING}
